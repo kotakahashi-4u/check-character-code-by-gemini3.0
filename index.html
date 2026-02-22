@@ -79,7 +79,7 @@
       
       <div id="drop-zone" class="border-2 border-dashed border-orange-300 rounded-lg p-12 text-center bg-orange-50 hover:bg-orange-100 transition-colors cursor-pointer group">
         <i data-lucide="file-spreadsheet" class="mx-auto h-16 w-16 text-orange-400 group-hover:text-orange-500 mb-4 transition-colors"></i>
-        <p class="text-gray-700 text-lg font-medium">CSVファイル（Shift_JIS形式）をここにドロップ</p>
+        <p class="text-gray-700 text-lg font-medium">CSVファイル（UTF-8 または Shift_JIS）をここにドロップ</p>
         <p class="text-gray-500 text-sm mt-2 mb-6">※対象ファイルサイズは数十MB程度までを推奨します</p>
         
         <label class="bg-orange-500 hover:bg-orange-600 text-white font-bold py-3 px-8 rounded shadow-md cursor-pointer transition-colors inline-block ripple">
@@ -88,9 +88,20 @@
         </label>
       </div>
       <p id="file-name-display" class="mt-4 text-center text-gray-600 font-medium hidden"></p>
+      
       <div id="encoding-info-area" class="mt-2 text-center hidden">
         <p id="encoding-display" class="text-orange-600 font-bold text-lg"></p>
-        <p class="text-xs text-gray-500 mt-1">※UTF-8等の場合は内部でShift_JISに変換してチェックを行います。</p>
+        <p class="text-xs text-gray-500 mt-1">
+          ファイルを文字列として読み込み、JIS X 0208 (第1・第2水準および基本記号) 以外の文字を検知します。<br>
+          <span class="text-orange-500">※「第3水準」「第4水準」等の象限判定は、Unicode領域に基づいた簡易的な分類推測です。</span>
+        </p>
+      </div>
+
+      <!-- リセットエリア（ファイル読み込み後に表示） -->
+      <div id="reset-area" class="mt-6 text-center hidden">
+        <button id="btn-reset" class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-2 px-6 rounded shadow-sm transition-colors inline-flex items-center">
+          <i data-lucide="refresh-cw" class="mr-2 h-4 w-4"></i> リセットして別のファイルを読み込む
+        </button>
       </div>
     </div>
 
@@ -170,6 +181,8 @@
     const fileNameDisplay = document.getElementById('file-name-display');
     const loadingOverlay = document.getElementById('loading-overlay');
     const resultArea = document.getElementById('result-area');
+    const resetArea = document.getElementById('reset-area');
+    const btnReset = document.getElementById('btn-reset');
     const filterErrorsToggle = document.getElementById('filter-errors');
     const btnPrev = document.getElementById('btn-prev');
     const btnNext = document.getElementById('btn-next');
@@ -191,6 +204,9 @@
       }
     });
 
+    // リセットボタンのイベント
+    btnReset.addEventListener('click', resetApp);
+
     filterErrorsToggle.addEventListener('change', (e) => {
       isFilterError = e.target.checked;
       currentPage = 1;
@@ -201,6 +217,7 @@
       if (currentPage > 1) {
         currentPage--;
         renderTable();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
       }
     });
 
@@ -209,8 +226,27 @@
       if (currentPage < totalPages) {
         currentPage++;
         renderTable();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
       }
     });
+
+    // アプリケーションのリセット関数
+    function resetApp() {
+      parseResults = [];
+      filteredResults = [];
+      currentPage = 1;
+      isFilterError = false;
+      filterErrorsToggle.checked = false;
+      
+      fileInput.value = '';
+      fileNameDisplay.classList.add('hidden');
+      document.getElementById('encoding-info-area').classList.add('hidden');
+      resultArea.classList.add('hidden');
+      resetArea.classList.add('hidden');
+      
+      document.getElementById('table-body').innerHTML = '';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
 
     function handleFileSelect(e) {
       if (e.target.files.length > 0) {
@@ -234,31 +270,21 @@
         const arrayBuffer = e.target.result;
         const data = new Uint8Array(arrayBuffer);
         
-        // UIブロックを防ぐため非同期で処理
         setTimeout(() => {
           try {
-            // 文字コードの自動判定
             const detected = Encoding.detect(data) || 'UNKNOWN';
             let encodingName = detected;
             if (detected === 'UTF8') encodingName = 'UTF-8';
             else if (detected === 'SJIS') encodingName = 'Shift_JIS';
             
-            // 判定結果を画面に表示
             document.getElementById('encoding-display').textContent = `判定された文字コード: ${encodingName}`;
             document.getElementById('encoding-info-area').classList.remove('hidden');
 
-            let targetData = data;
+            const unicodeArray = Encoding.convert(data, { to: 'UNICODE', from: detected });
+            const textStr = Encoding.codeToString(unicodeArray);
             
-            // SJIS以外（UTF-8など）の場合は、内部でSJISバイナリに変換する
-            if (detected !== 'SJIS' && detected !== 'UNKNOWN') {
-              const converted = Encoding.convert(data, {
-                to: 'SJIS',
-                from: detected
-              });
-              targetData = new Uint8Array(converted);
-            }
+            analyzeTextData(textStr);
             
-            analyzeBinaryData(targetData);
           } catch (error) {
             console.error("解析エラー:", error);
             alert("ファイルの解析中にエラーが発生しました。");
@@ -269,130 +295,147 @@
       reader.readAsArrayBuffer(file);
     }
 
-    function toHex(b) {
-      return "0x" + b.toString(16).toUpperCase().padStart(2, '0');
-    }
+    // 文字の象限（カテゴリ）を判定する関数
+    function getCharacterQuadrant(charStr, sjisArray, isGaiji) {
+      // 既にSJIS区点判定で外字(95〜114区)と判定されている場合
+      if (isGaiji) return "外字";
+      
+      const codePoint = charStr.codePointAt(0);
 
-    function toHex2(b1, b2) {
-      return "0x" + b1.toString(16).toUpperCase().padStart(2, '0') + b2.toString(16).toUpperCase().padStart(2, '0');
-    }
-
-    // バイナリデータ（Shift_JIS）を解析するメイン処理
-    function analyzeBinaryData(data) {
-      parseResults = [];
-      let lineNumber = 1;
-      let currentLineBytes = [];
-      let errorChars = [];
-
-      for (let i = 0; i < data.length; i++) {
-        let b1 = data[i];
-
-        // 改行コード（行の区切り）
-        if (b1 === 0x0A || b1 === 0x0D) {
-          if (b1 === 0x0D && i + 1 < data.length && data[i + 1] === 0x0A) {
-            i++; // CR LF の場合は LF をスキップ
-          }
-          saveLineData(lineNumber, currentLineBytes, errorChars);
-          lineNumber++;
-          currentLineBytes = [];
-          errorChars = [];
-          continue;
-        }
-
-        // 1バイト文字 (半角英数・記号) は許容
-        if (b1 >= 0x20 && b1 <= 0x7E) {
-          currentLineBytes.push(b1);
-        } 
-        // 半角カナは第1・第2水準ではないためエラーとして検出
-        else if (b1 >= 0xA1 && b1 <= 0xDF) {
-          currentLineBytes.push(b1);
-          errorChars.push({
-            charStr: new TextDecoder('sjis').decode(new Uint8Array([b1])),
-            isGaiji: false,
-            hexCode: toHex(b1)
-          });
-        } 
-        // 2バイト文字 (Shift_JIS)
-        else if ((b1 >= 0x81 && b1 <= 0x9F) || (b1 >= 0xE0 && b1 <= 0xFC)) {
-          if (i + 1 < data.length) {
-            let b2 = data[i + 1];
-            currentLineBytes.push(b1, b2);
-            i++;
-
-            // 区点の計算 (JIS X 0208)
-            let row;
-            if (b1 >= 0x81 && b1 <= 0x9F) {
-              row = (b1 - 0x81) * 2 + 1;
-            } else {
-              row = (b1 - 0xE0) * 2 + 63;
-            }
-
-            let cell;
-            if (b2 >= 0x40 && b2 <= 0x7E) {
-              cell = b2 - 0x3F;
-            } else if (b2 >= 0x80 && b2 <= 0x9E) {
-              cell = b2 - 0x40;
-            } else if (b2 >= 0x9F && b2 <= 0xFC) {
-              row += 1;
-              cell = b2 - 0x9E;
-            } else {
-              // 第2バイトが不正
-              errorChars.push({ charStr: "不明", isGaiji: false, hexCode: toHex2(b1, b2) });
-              continue;
-            }
-
-            // 許容範囲の判定 (1〜8区: 非漢字記号等, 16〜84区: 第1・第2水準)
-            let isOk = (row >= 1 && row <= 8) || (row >= 16 && row <= 84);
-            // 外字領域の判定 (一般的に 95〜114区)
-            let isGaiji = (row >= 95 && row <= 114) || (b1 >= 0xF0 && b1 <= 0xF9);
-
-            if (!isOk) {
-              let charStr = new TextDecoder('sjis').decode(new Uint8Array([b1, b2]));
-              errorChars.push({
-                charStr: charStr,
-                isGaiji: isGaiji,
-                hexCode: toHex2(b1, b2)
-              });
-            }
-          } else {
-            // ファイル末尾で途切れている場合
-            currentLineBytes.push(b1);
-            errorChars.push({ charStr: "不明", isGaiji: false, hexCode: toHex(b1) });
-          }
-        } 
-        else {
-          // その他の制御文字など (タブ 0x09 は許容)
-          currentLineBytes.push(b1);
-          if (b1 !== 0x09) {
-            errorChars.push({ charStr: "制御/不明", isGaiji: false, hexCode: toHex(b1) });
-          }
-        }
+      // UnicodeのPrivate Use Area (私用領域) の場合
+      if (codePoint >= 0xE000 && codePoint <= 0xF8FF) return "外字";
+      
+      // 半角カナ
+      if (sjisArray.length === 1 && sjisArray[0] >= 0xA1 && sjisArray[0] <= 0xDF) {
+        return "半角カナ";
       }
+      
+      // Shift_JIS変換不可の文字 (JIS第1・第2水準外)
+      if (sjisArray.includes(0x3F) && charStr !== '?' && charStr !== '？') {
+        // CJK統合漢字拡張B以降（サロゲートペア等）を「第4水準」とみなす
+        if (codePoint >= 0x20000 && codePoint <= 0x2FFFF) {
+          return "第4水準";
+        } 
+        // 通常のCJK統合漢字、拡張Aなどを「第3水準」とみなす
+        else if ((codePoint >= 0x4E00 && codePoint <= 0x9FFF) || 
+                 (codePoint >= 0x3400 && codePoint <= 0x4DBF) ||
+                 (codePoint >= 0xF900 && codePoint <= 0xFAFF)) {
+          return "第3水準";
+        }
+        
+        // その他の記号や絵文字など
+        return "環境依存文字";
+      }
+      
+      // Shift_JISには存在するが、許容区点外の場合
+      return "機種依存文字";
+    }
 
-      // 最終行の処理
-      if (currentLineBytes.length > 0) {
-        saveLineData(lineNumber, currentLineBytes, errorChars);
+    function analyzeTextData(text) {
+      parseResults = [];
+      const lines = text.split(/\r\n|\n|\r/);
+      
+      for (let i = 0; i < lines.length; i++) {
+        const lineStr = lines[i];
+        const lineNumber = i + 1;
+        
+        if (i === lines.length - 1 && lineStr === "") continue;
+        
+        let errorChars = [];
+        const chars = Array.from(lineStr);
+        
+        for (const charStr of chars) {
+          const charCodeArray = Encoding.stringToCode(charStr);
+          // UTF-8の16進数文字列を生成 (例: E4B880)
+          const utf8Array = Encoding.convert(charCodeArray, { to: 'UTF8', from: 'UNICODE' });
+          const utf8Hex = utf8Array.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join('');
+          
+          const sjisArray = Encoding.convert(charCodeArray, { to: 'SJIS', from: 'UNICODE' });
+
+          let isError = false;
+          let isGaiji = false;
+
+          // SJIS変換不可の文字チェック
+          if (charStr !== '?' && charStr !== '？' && sjisArray.includes(0x3F)) {
+            isError = true;
+          } else {
+            // SJISのバイトによる区点チェック
+            for (let j = 0; j < sjisArray.length; j++) {
+              let b1 = sjisArray[j];
+              
+              if (b1 >= 0x20 && b1 <= 0x7E) {
+                continue;
+              } else if (b1 >= 0xA1 && b1 <= 0xDF) {
+                isError = true;
+              } else if ((b1 >= 0x81 && b1 <= 0x9F) || (b1 >= 0xE0 && b1 <= 0xFC)) {
+                if (j + 1 < sjisArray.length) {
+                  let b2 = sjisArray[j + 1];
+                  j++;
+                  
+                  let row;
+                  if (b1 >= 0x81 && b1 <= 0x9F) {
+                    row = (b1 - 0x81) * 2 + 1;
+                  } else {
+                    row = (b1 - 0xE0) * 2 + 63;
+                  }
+                  
+                  let cell;
+                  if (b2 >= 0x40 && b2 <= 0x7E) {
+                    cell = b2 - 0x3F;
+                  } else if (b2 >= 0x80 && b2 <= 0x9E) {
+                    cell = b2 - 0x40;
+                  } else if (b2 >= 0x9F && b2 <= 0xFC) {
+                    row += 1;
+                    cell = b2 - 0x9E;
+                  } else {
+                    isError = true;
+                    continue;
+                  }
+                  
+                  let isOk = (row >= 1 && row <= 8) || (row >= 16 && row <= 84);
+                  if (row >= 95 && row <= 114) {
+                    isGaiji = true;
+                  }
+                  
+                  if (!isOk) {
+                    isError = true;
+                  }
+                } else {
+                  isError = true;
+                }
+              } else if (b1 !== 0x09) {
+                isError = true;
+              }
+            }
+          }
+
+          if (isError) {
+            let quadrant = getCharacterQuadrant(charStr, sjisArray, isGaiji);
+            errorChars.push({
+              charStr: charStr,
+              quadrant: quadrant,
+              utf8Hex: utf8Hex
+            });
+          }
+        }
+        
+        parseResults.push({
+          line: lineNumber,
+          originalText: lineStr,
+          errors: errorChars
+        });
       }
 
       loadingOverlay.classList.add('hidden');
       resultArea.classList.remove('hidden');
+      resetArea.classList.remove('hidden');
       currentPage = 1;
       renderTable();
       
-      // 結果エリアへスクロール
       resultArea.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
-    function saveLineData(line, bytesArray, errorsArray) {
-      parseResults.push({
-        line: line,
-        bytes: new Uint8Array(bytesArray),
-        errors: [...errorsArray]
-      });
-    }
-
     function renderTable() {
-      // フィルタリング
       filteredResults = isFilterError 
         ? parseResults.filter(r => r.errors.length > 0) 
         : parseResults;
@@ -406,7 +449,6 @@
 
       const tbody = document.getElementById('table-body');
       tbody.innerHTML = '';
-      const decoder = new TextDecoder('sjis');
 
       if (currentData.length === 0) {
         tbody.innerHTML = `<tr><td colspan="4" class="px-6 py-8 text-center text-gray-500 font-medium">該当するデータがありません。</td></tr>`;
@@ -416,17 +458,14 @@
         const tr = document.createElement('tr');
         tr.className = "hover:bg-orange-50 transition-colors duration-150";
 
-        // 1. 行番号
         const tdLine = document.createElement('td');
         tdLine.className = "px-6 py-4 whitespace-nowrap text-center text-sm font-medium text-gray-600 border-r border-gray-100";
         tdLine.textContent = row.line;
 
-        // 2. 住所表示
         const tdAddress = document.createElement('td');
         tdAddress.className = "px-6 py-4 text-sm text-gray-800 break-all border-r border-gray-100";
-        tdAddress.textContent = decoder.decode(row.bytes);
+        tdAddress.textContent = row.originalText;
 
-        // 3. 確認結果
         const tdResult = document.createElement('td');
         tdResult.className = "px-6 py-4 whitespace-nowrap text-center border-r border-gray-100";
         if (row.errors.length === 0) {
@@ -435,16 +474,18 @@
           tdResult.innerHTML = `<div class="inline-flex items-center justify-center bg-red-100 text-red-700 rounded-full h-8 w-8 shadow-sm font-bold text-lg">×</div>`;
         }
 
-        // 4. 対象文字
         const tdTarget = document.createElement('td');
         tdTarget.className = "px-6 py-4 text-sm font-medium";
         if (row.errors.length > 0) {
           const errorTexts = row.errors.map(err => {
-            if (err.isGaiji) {
-              return `<span class="inline-block bg-red-50 text-red-600 border border-red-200 rounded px-2 py-1 m-1">外字 (${err.hexCode})</span>`;
-            } else {
-              return `<span class="inline-block bg-orange-50 text-orange-700 border border-orange-200 rounded px-2 py-1 m-1">${err.charStr} (${err.hexCode})</span>`;
-            }
+            // 外字は赤色、それ以外はオレンジ色のラベルにする
+            const isGaijiStyle = err.quadrant === "外字";
+            const colorClass = isGaijiStyle ? "bg-red-50 text-red-600 border-red-200" : "bg-orange-50 text-orange-700 border-orange-200";
+            
+            // 例: 第3水準: EB8080 (髙)
+            return `<span class="inline-block ${colorClass} border rounded px-2 py-1 m-1 text-xs">
+              <span class="font-bold">${err.quadrant}</span>: ${err.utf8Hex} <span class="text-gray-500 font-normal">(${err.charStr})</span>
+            </span>`;
           });
           tdTarget.innerHTML = errorTexts.join('');
         } else {
@@ -458,7 +499,6 @@
         tbody.appendChild(tr);
       });
 
-      // ページネーション情報の更新
       const infoText = document.getElementById('pagination-info');
       if (filteredResults.length === 0) {
         infoText.textContent = `全 0 件`;
